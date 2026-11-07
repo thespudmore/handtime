@@ -218,6 +218,43 @@ input {
   transform: translateY(-2px);
 }
 
+.hold-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem 1.75rem;
+  margin-top: 0.15rem;
+}
+
+.hold-stat {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 5.5rem;
+}
+
+.hold-label {
+  color: var(--chalk-dim);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hold-stat strong {
+  font-family: var(--font-display);
+  font-size: clamp(1.45rem, 5vw, 2rem);
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  transition: color 200ms ease;
+}
+
+.hold-stat strong.is-live {
+  color: var(--signal);
+}
+
+.hold-stat strong.is-new {
+  animation: best-flash 900ms ease;
+}
+
 .goal-row {
   width: min(100%, 22rem);
   display: grid;
@@ -419,6 +456,21 @@ input {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes best-flash {
+  0% {
+    color: var(--chalk);
+    transform: scale(1);
+  }
+  35% {
+    color: var(--signal);
+    transform: scale(1.08);
+  }
+  100% {
+    color: var(--chalk);
+    transform: scale(1);
   }
 }
 

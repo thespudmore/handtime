@@ -8,11 +8,14 @@ export type DayRecord = {
 
 export type AppData = {
   goalMinutes: number
+  /** Longest continuous handstand hold in seconds (all-time, this device). */
+  longestSeconds: number
   days: Record<string, DayRecord>
 }
 
 const DEFAULT_DATA: AppData = {
   goalMinutes: 10,
+  longestSeconds: 0,
   days: {},
 }
 
@@ -33,6 +36,10 @@ export function loadData(): AppData {
         typeof parsed.goalMinutes === 'number' && parsed.goalMinutes > 0
           ? parsed.goalMinutes
           : DEFAULT_DATA.goalMinutes,
+      longestSeconds:
+        typeof parsed.longestSeconds === 'number' && parsed.longestSeconds > 0
+          ? parsed.longestSeconds
+          : DEFAULT_DATA.longestSeconds,
       days: parsed.days && typeof parsed.days === 'object' ? parsed.days : {},
     }
   } catch {
@@ -65,6 +72,16 @@ export function addHandstandSeconds(data: AppData, deltaSeconds: number): AppDat
         goalMet: seconds >= goalSeconds,
       },
     },
+  }
+  saveData(next)
+  return next
+}
+
+export function recordHoldSeconds(data: AppData, holdSeconds: number): AppData {
+  if (holdSeconds <= data.longestSeconds) return data
+  const next: AppData = {
+    ...data,
+    longestSeconds: holdSeconds,
   }
   saveData(next)
   return next

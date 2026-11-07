@@ -13,14 +13,55 @@ export type StableHandstandState = {
   exitProgress: number
 }
 
+export type DetectOptions = {
+  /**
+   * Softer geometry used only to *stay* in a hold. Entering still uses the
+   * stricter thresholds so random poses don't start the clock.
+   */
+  maintain?: boolean
+}
+
+type Thresholds = {
+  visibility: number
+  ankleHipGap: number
+  hipShoulderGap: number
+  shoulderWristGap: number
+  minSpan: number
+  maxLateralRatio: number
+}
+
+const ENTER: Thresholds = {
+  visibility: 0.45,
+  ankleHipGap: 0.02,
+  hipShoulderGap: 0.02,
+  shoulderWristGap: 0.01,
+  minSpan: 0.28,
+  maxLateralRatio: 0.85,
+}
+
+/** Tolerates a dip, banana, or brief landmark wobble mid-hold. */
+const MAINTAIN: Thresholds = {
+  visibility: 0.28,
+  ankleHipGap: 0,
+  hipShoulderGap: 0,
+  shoulderWristGap: -0.02,
+  minSpan: 0.2,
+  maxLateralRatio: 1.15,
+}
+
 /**
  * Geometric handstand check using image coordinates (y grows downward).
  * Wall-assisted counts — we only require an inverted body line.
  */
-export function detectRawHandstand(landmarks: Point[]): RawHandstandSample {
+export function detectRawHandstand(
+  landmarks: Point[],
+  options: DetectOptions = {},
+): RawHandstandSample {
   if (landmarks.length < 29) {
     return { inverted: false, reason: 'no pose' }
   }
+
+  const t = options.maintain ? MAINTAIN : ENTER
 
   const lw = landmarks[LM.leftWrist]
   const rw = landmarks[LM.rightWrist]
@@ -32,7 +73,7 @@ export function detectRawHandstand(landmarks: Point[]): RawHandstandSample {
   const ra = landmarks[LM.rightAnkle]
 
   const keyPoints = [lw, rw, ls, rs, lh, rh, la, ra]
-  if (!keyPoints.every((p) => visibleEnough(p))) {
+  if (!keyPoints.every((p) => visibleEnough(p, t.visibility))) {
     return { inverted: false, reason: 'low confidence' }
   }
 
@@ -42,16 +83,14 @@ export function detectRawHandstand(landmarks: Point[]): RawHandstandSample {
   const ankles = midpoint(la, ra)
 
   // Inverted: ankles above hips above shoulders/wrists (smaller y = higher on screen)
-  const anklesAboveHips = ankles.y < hips.y - 0.02
-  const hipsAboveShoulders = hips.y < shoulders.y - 0.02
-  const shouldersAboveWrists = shoulders.y < wrists.y - 0.01
+  const anklesAboveHips = ankles.y < hips.y - t.ankleHipGap
+  const hipsAboveShoulders = hips.y < shoulders.y - t.hipShoulderGap
+  const shouldersAboveWrists = shoulders.y < wrists.y - t.shoulderWristGap
 
-  // Body roughly stacked vertically (not a deep bridge / cartwheel silhouette)
   const verticalSpan = Math.abs(ankles.y - wrists.y)
   const lateralDrift = Math.abs(ankles.x - wrists.x)
-  const stacked = verticalSpan > 0.28 && lateralDrift < verticalSpan * 0.85
+  const stacked = verticalSpan > t.minSpan && lateralDrift < verticalSpan * t.maxLateralRatio
 
-  // Hands should be the lowest major joint cluster
   const handsLow = wrists.y > hips.y && wrists.y > shoulders.y
 
   if (!anklesAboveHips) return { inverted: false, reason: 'feet not up' }
@@ -71,9 +110,18 @@ export class HandstandTracker {
   private readonly enterMs: number
   private readonly exitMs: number
 
-  constructor(enterMs = 400, exitMs = 450) {
+  /**
+   * Enter quickly once the shape is clear; exit slowly so a half-second dip
+   * or confidence blip does not split one hold into two.
+   */
+  constructor(enterMs = 350, exitMs = 1400) {
     this.enterMs = enterMs
     this.exitMs = exitMs
+  }
+
+  /** Whether we are currently counting a stable handstand. */
+  get active(): boolean {
+    return this.isHandstand
   }
 
   update(raw: RawHandstandSample, now = performance.now()): StableHandstandState {

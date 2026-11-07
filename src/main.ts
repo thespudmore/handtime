@@ -1,6 +1,7 @@
 import './style.css'
 import { PoseLandmarker, type PoseLandmarkerResult } from '@mediapipe/tasks-vision'
 import { startCamera, stopCamera, requestWakeLock } from './camera'
+import { isDeviceUpsideDown, startGravityMonitor } from './device/gravity'
 import { drawPose } from './pose/draw'
 import { detectRawHandstand, HandstandTracker } from './pose/handstand'
 import { createPoseLandmarker, detectPose } from './pose/landmarker'
@@ -9,6 +10,7 @@ import {
   getTodayRecord,
   loadData,
   recentDays,
+  recordHoldSeconds,
   setGoalMinutes,
   type AppData,
 } from './storage/daily'
@@ -46,6 +48,16 @@ app.innerHTML = `
       <div class="center-stack">
         <p class="eyebrow" id="session-label">today's handstand time</p>
         <p class="timer" id="timer">00:00</p>
+        <div class="hold-row">
+          <div class="hold-stat">
+            <span class="hold-label" id="hold-label">this hold</span>
+            <strong id="hold-time">00:00</strong>
+          </div>
+          <div class="hold-stat">
+            <span class="hold-label">best</span>
+            <strong id="best-time">00:00</strong>
+          </div>
+        </div>
         <div class="goal-row">
           <div class="goal-label">
             <span>Daily goal</span>
@@ -80,6 +92,9 @@ const overlay = el<HTMLCanvasElement>('overlay')
 const statusPill = el<HTMLDivElement>('status-pill')
 const reasonEl = el<HTMLParagraphElement>('reason')
 const timerEl = el<HTMLParagraphElement>('timer')
+const holdLabel = el<HTMLSpanElement>('hold-label')
+const holdTimeEl = el<HTMLElement>('hold-time')
+const bestTimeEl = el<HTMLElement>('best-time')
 const goalText = el<HTMLElement>('goal-text')
 const goalFill = el<HTMLSpanElement>('goal-fill')
 const toggleBtn = el<HTMLButtonElement>('toggle-session')
@@ -102,12 +117,18 @@ let raf = 0
 let lastVideoTime = -1
 let lastPersist = performance.now()
 let handstandClockStart: number | null = null
+/** Wall-clock start of the current continuous hold (stable handstand). */
+let holdClockStart: number | null = null
+/** Most recent completed hold, kept on screen until the next one starts. */
+let lastHoldSeconds = 0
+let holdWasActive = false
 
 const tracker = new HandstandTracker()
 
 goalInput.value = String(data.goalMinutes)
 renderStats()
 renderHistory()
+renderHoldStats(performance.now())
 
 enableBtn.addEventListener('click', () => {
   void boot()
@@ -144,6 +165,8 @@ async function boot(): Promise<void> {
   enableBtn.textContent = 'Loading model…'
 
   try {
+    // Same user gesture as camera — required for motion permission on iOS.
+    void startGravityMonitor()
     landmarker = await createPoseLandmarker()
     enableBtn.textContent = 'Starting camera…'
     stream = await startCamera(video, preferRear)
@@ -166,6 +189,8 @@ async function boot(): Promise<void> {
 function startSession(): void {
   sessionActive = true
   handstandClockStart = null
+  holdClockStart = null
+  holdWasActive = false
   tracker.reset()
   toggleBtn.textContent = 'Stop'
   toggleBtn.classList.add('is-live')
@@ -173,10 +198,13 @@ function startSession(): void {
     wakeLock = lock
   })
   renderStats()
+  renderHoldStats(performance.now())
 }
 
 function stopSession(): void {
-  flushHandstandTime(performance.now(), false)
+  const now = performance.now()
+  flushHandstandTime(now, false)
+  finishHold(now)
   sessionActive = false
   handstandClockStart = null
   tracker.reset()
@@ -188,6 +216,7 @@ function stopSession(): void {
   void wakeLock?.release()
   wakeLock = null
   renderStats()
+  renderHoldStats(now)
 }
 
 async function flipCamera(): Promise<void> {
@@ -209,6 +238,7 @@ function loop(): void {
   const now = performance.now()
   if (video.currentTime === lastVideoTime) {
     updateTimerDisplay(now)
+    renderHoldStats(now)
     return
   }
   lastVideoTime = video.currentTime
@@ -229,7 +259,10 @@ function loop(): void {
     return
   }
 
-  const raw = detectRawHandstand(landmarks)
+  let raw = detectRawHandstand(landmarks, { maintain: tracker.active })
+  if (raw.inverted && isDeviceUpsideDown()) {
+    raw = { inverted: false, reason: 'phone upside down' }
+  }
   const state = tracker.update(raw, now)
   drawPose(ctx, landmarks, overlay.width, overlay.height, state.isHandstand)
   applyPoseUi(state, now)
@@ -248,11 +281,16 @@ function applyPoseUi(
     if (sessionActive && handstandClockStart === null) {
       handstandClockStart = now
     }
+    if (sessionActive && holdClockStart === null) {
+      holdClockStart = now
+      holdWasActive = true
+    }
   } else {
     stage.classList.remove('is-handstand')
     statusPill.classList.remove('on')
     statusPill.textContent = state.rawInverted ? 'locking in…' : 'upright'
     flushHandstandTime(now, false)
+    if (holdWasActive) finishHold(now)
   }
 
   if (sessionActive && state.isHandstand && now - lastPersist > 1000) {
@@ -261,6 +299,27 @@ function applyPoseUi(
   }
 
   updateTimerDisplay(now)
+  renderHoldStats(now)
+}
+
+function finishHold(now: number): void {
+  if (holdClockStart === null) {
+    holdWasActive = false
+    return
+  }
+  const held = (now - holdClockStart) / 1000
+  holdClockStart = null
+  holdWasActive = false
+  if (held <= 0) return
+  lastHoldSeconds = held
+  const previousBest = data.longestSeconds
+  data = recordHoldSeconds(data, held)
+  if (data.longestSeconds > previousBest) {
+    bestTimeEl.classList.remove('is-new')
+    // Retrigger CSS animation when a record is set.
+    void bestTimeEl.offsetWidth
+    bestTimeEl.classList.add('is-new')
+  }
 }
 
 function flushHandstandTime(now: number, keepRunning: boolean): void {
@@ -288,8 +347,19 @@ function updateTimerDisplay(now: number): void {
   goalText.textContent = `${mins.toFixed(1)} / ${data.goalMinutes} min`
 }
 
+function renderHoldStats(now: number): void {
+  const liveHold =
+    sessionActive && holdClockStart !== null ? (now - holdClockStart) / 1000 : 0
+  const showingLive = liveHold > 0
+  holdLabel.textContent = showingLive ? 'this hold' : 'last hold'
+  holdTimeEl.textContent = formatDuration(showingLive ? liveHold : lastHoldSeconds)
+  holdTimeEl.classList.toggle('is-live', showingLive)
+  bestTimeEl.textContent = formatDuration(data.longestSeconds)
+}
+
 function renderStats(): void {
   updateTimerDisplay(performance.now())
+  renderHoldStats(performance.now())
 }
 
 function renderHistory(): void {
